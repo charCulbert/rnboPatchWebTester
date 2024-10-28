@@ -1,0 +1,729 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RNBO Patch Loader</title>
+    <!-- <script type="text/javascript" src="https://cdn.cycling74.com/rnbo/latest/rnbo.min.js"></script> -->
+    <!-- CSS will go here -->
+    <style>
+        body {
+            margin: 0;
+            padding-top: 20px;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            flex-direction: column;
+            background-color: #000000;
+            color: rgb(200, 200, 200);
+            overflow: hidden;
+        }
+
+        #initialModal {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            cursor: pointer;
+            z-index: 1000;
+            background-color: #000000;
+        }
+
+        #dropZone {
+            width: 100%;
+            max-width: 80vw;
+            height: 80vh;
+            border: 1px dashed rgba(255, 255, 255, 0.713);
+            border-radius: 16px;
+            display: flex;
+            position: fixed;
+            justify-content: center;
+            align-items: center;
+            transition: all 0.3s ease;
+            margin-bottom: 20px;
+        }
+
+        #dropZone.dragging {
+            border-color: #848484;
+            transform: scale(1.02);
+        }
+
+        .drop-content {
+            text-align: center;
+        }
+
+        #status {
+            position: fixed;
+            bottom: 0;
+            left: 10px;
+            padding: 10px 10px;
+            border-radius: 8px;
+            display: none;
+            z-index: 100;
+        }
+
+        #rnbo-close {
+            box-shadow: none !important;
+            border: none !important;
+            background-color: transparent !important;
+            font-size: 2em;
+            cursor: pointer;
+            color: rgba(255, 255, 255, 0.713);
+            position: fixed;
+            top: 5px;
+            left: 5px;
+        }
+
+        #rnbo-root {
+            width: 100%;
+            max-width: 800px;
+            display: flex;
+            visibility: hidden;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        #volumeControl {
+            position: fixed;
+            margin: 10px;
+            display: flex;
+            bottom: 0;
+            flex-direction: row;
+            right: 10px;
+            width: 40vw;
+            display: none;
+            max-width: 500px;
+        }
+
+
+        #rnbo-clickable-keyboard {
+    display: flex;
+    flex-wrap: wrap;
+}
+
+#rnbo-clickable-keyboard > div {
+    margin: 2px;
+    border: solid black 1px;
+    min-height: 50px;
+    flex-grow: 1;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    background-color: #848484;
+}
+
+#rnbo-clickable-keyboard > div.clicked {
+    background: #222222;
+    color: #dddddd;
+}
+
+#rnbo-parameter-sliders {
+    display: flex;
+    flex-direction: column;
+}
+
+#rnbo-parameter-sliders > div {
+    display: flex;
+}
+
+#rnbo-parameter-sliders > div > input:first-of-type {
+    flex-grow: 1;
+}
+
+    </style>
+</head>
+
+<body>
+    <div id="initialModal">
+        Click anywhere to initialize audio
+    </div>
+
+
+    <div id="dropZone">
+        <div class="drop-content">
+            <p>Drop RNBO Patch Here</p>
+            <p>Drop a .export.json file or a folder with dependencies</p>
+        </div>
+    </div>
+
+    <noscript>You need to enable JavaScript to run this app.</noscript>
+    <!-- Just the root container - everything else will be generated -->
+    <div id="rnbo-root">
+        <button id="rnbo-close">x</button>
+        <div style='display: flex;' <p id="patcher-title">Unnamed patcher</p>
+        </div>
+        <div id="rnbo-clickable-keyboard">
+            <p>MIDI Keyboard</p>
+            <em id="no-midi-label">No MIDI input</em>
+        </div>
+        <div id="rnbo-inports">
+            <p>Inports</p>
+            <em id="no-inports-label">No inports available</em>
+            <form id="inport-form" className="inport">
+                <div className="inport-input">
+                    <select id="inport-select"></select>
+                    <input id="inport-text" type="text"></input>
+                    <input id="inport-submit" className="smallButton" type="submit" value="Send" />
+                </div>
+            </form>
+        </div>
+        <div id="rnbo-console">
+            <p>Outports</p>
+            <em id="no-outports-label">No outports available</em>
+            <div id="rnbo-console-div">
+                <p id="rnbo-console-readout">Waiting for messages...</p>
+                <em id="rnbo-console-description">Check the developer console for more messages from the RNBO
+                    device</em>
+            </div>
+        </div>
+        <div id="rnbo-presets">
+            <p>Presets</p>
+            <em id="no-presets-label">No presets defined</em>
+            <select id="preset-select"></select>
+        </div>
+        <div id="rnbo-parameter-sliders">
+            <p>Parameters</p>
+            <em id="no-param-label">No parameters</em>
+        </div>
+    </div>
+
+    <div id="status"></div>
+
+    <div id="volumeControl">
+        <input type="range" id="volumeSlider" min="0" max="1" step="0.01" value="1">
+        <label for="volumeSlider">Master Volume</label>
+    </div>
+
+    <script>
+        // Global variables
+        let audioContext;
+        let mainOutput;
+        let device;
+        let rnboCloseButton;
+        let defaultUI;
+
+        // Utility Functions
+        function showStatus(message, isError = false) {
+            const status = document.getElementById('status');
+            status.textContent = message;
+            status.style.display = 'block';
+            status.style.backgroundColor = isError ? 'rgba(255, 0, 0, 0.8)' : 'rgba(0, 0, 0, 0.8)';
+            setTimeout(() => {
+                status.style.display = 'none';
+            }, 5000);
+        }
+
+        function loadRNBOScript(version) {
+            return new Promise((resolve, reject) => {
+                if (/^\d+\.\d+\.\d+-dev$/.test(version)) {
+                    throw new Error("Patcher exported with a Debug Version!");
+                }
+                const el = document.createElement("script");
+                el.src = "https://c74-public.nyc3.digitaloceanspaces.com/rnbo/" + encodeURIComponent(version) + "/rnbo.min.js";
+                el.onload = resolve;
+                el.onerror = function (err) {
+                    console.log(err);
+                    reject(new Error("Failed to load rnbo.js v" + version));
+                };
+                document.body.append(el);
+            });
+        }
+
+        function cleanUpOldDevice() {
+            // Clean up any existing device
+            if (device) {
+                device.node.disconnect();
+                device = null;
+            }
+            rnboPatcherUI.innerHTML = '';
+
+        }
+
+        // Core setup function
+        async function setup(files) {
+            try {
+                console.log('Setting up RNBO with files:', files);
+
+                // Find our .export.json file
+                const patcherFile = files.find(f => f.name.endsWith('.export.json'));
+                if (!patcherFile) {
+                    throw new Error('No .export.json file found');
+                }
+
+                // Read and parse the patcher
+                const patcherContent = await patcherFile.text();
+                const patcher = JSON.parse(patcherContent);
+
+                // Load RNBO if needed
+                if (!window.RNBO) {
+                    await loadRNBOScript(patcher.desc.meta.rnboversion);
+                }
+
+                // Find and process dependencies if they exist
+                let dependencies = [];
+                const dependenciesFile = files.find(f => f.name === 'dependencies.json');
+                if (dependenciesFile) {
+                    const dependenciesContent = await dependenciesFile.text();
+                    dependencies = JSON.parse(dependenciesContent);
+                    console.log(dependencies);
+                }
+
+                cleanUpOldDevice();
+                rnboPatcherUI.innerHTML = defaultUI;
+                // rnbo close handler
+                rnboCloseButton = document.getElementById('rnbo-close');
+                rnboCloseButton.addEventListener('click', () => {
+                    console.log('clicked');
+                    cleanUpOldDevice();
+                    moveDropZoneBackIntoPlace();
+                    showStatus('Patcher closed');
+                });
+
+
+                // Create new device
+                device = await RNBO.createDevice({
+                    context: audioContext,
+                    patcher: patcher
+                });
+
+                // Load dependencies if we have them
+                if (dependencies.length) {
+                    console.log('Loading dependencies:', dependencies);
+                    await loadDependencies(device, dependencies, files);
+                }
+
+                // Connect device to output
+                device.node.connect(mainOutput);
+
+                // Update UI
+                document.getElementById("patcher-title").innerText =
+                    (patcher.desc.meta.filename || "Unnamed Patcher") +
+                    " (v" + patcher.desc.meta.rnboversion + ")";
+
+                // Create all UI elements
+                makeSliders(device);
+                makeInportForm(device);
+                attachOutports(device);
+                loadPresets(device, patcher);
+                makeMIDIKeyboard(device);
+
+                moveDropZoneOutOfWay();
+                rnboPatcherUI.style.visibility = 'visible';
+
+
+                console.log('RNBO patch setup complete');
+                showStatus('Patch loaded successfully');
+
+            } catch (error) {
+                console.error('Error in setup:', error);
+                showStatus('Error loading patch: ' + error.message, true);
+            }
+        }
+
+
+
+        function moveDropZoneOutOfWay() {
+            const dropZone = document.getElementById('dropZone');
+            dropZone.style.top = '5px';
+            dropZone.style.right = '5px';
+            dropZone.style.height = '20vh';
+            dropZone.style.width = '30vw';
+        }
+
+        function moveDropZoneBackIntoPlace() {
+            const dropZone = document.getElementById('dropZone');
+            dropZone.style.top = 'auto'
+            dropZone.style.right = 'auto';
+            dropZone.style.height = '80vh';
+            dropZone.style.width = '80vw';
+        }
+
+
+
+        async function loadDependencies(device, dependencies, files) {
+            try {
+                console.log('Loading dependencies:', dependencies);
+
+                // Process each dependency
+                for (let dependency of dependencies) {
+                    // Extract just the filename from the path
+                    const filename = dependency.file.split('/').pop();
+                    console.log('Looking for file:', filename);
+
+                    // Find matching file in our dropped files
+                    const matchingFile = files.find(f => f.name.includes(filename));
+
+                    if (matchingFile) {
+                        console.log('Found matching file:', matchingFile.name);
+                        const fileURL = URL.createObjectURL(matchingFile);
+                        // Update the dependency with the blob URL
+                        dependency.file = fileURL;
+                    } else {
+                        console.warn(`Could not find matching file for ${filename}`);
+                    }
+                }
+
+                // Load all dependencies into the device
+                await device.loadDataBufferDependencies(dependencies);
+                console.log('Dependencies loaded successfully');
+
+            } catch (err) {
+                console.error("Error loading dependencies:", err);
+                showStatus('Error loading audio dependencies', true);
+            } finally {
+                // Clean up any created URLs
+                dependencies.forEach(dep => {
+                    if (dep.file && dep.file.startsWith('blob:')) {
+                        URL.revokeObjectURL(dep.file);
+                    }
+                });
+            }
+        }
+
+        async function handleDrop(e) {
+            e.preventDefault();
+            const dropZone = document.getElementById('dropZone');
+            dropZone.classList.remove('dragging');
+
+            try {
+                let files = [];
+
+                // Handle folder drop
+                if (e.dataTransfer.items && e.dataTransfer.items[0].webkitGetAsEntry) {
+                    const entry = e.dataTransfer.items[0].webkitGetAsEntry();
+                    if (entry.isDirectory) {
+                        showStatus('Processing folder...');
+                        files = await collectFilesFromFolder(entry);
+                    }
+                }
+
+                // Handle single file drop
+                if (files.length === 0) {
+                    const file = e.dataTransfer.files[0];
+                    if (file && file.name.endsWith('.export.json')) {
+                        files = [file];
+                    } else {
+                        throw new Error('Please drop a valid .export.json file or folder');
+                    }
+                }
+
+                await setup(files);
+
+            } catch (error) {
+                console.error('Error handling drop:', error);
+                showStatus(error.message, true);
+            }
+        }
+
+        async function collectFilesFromFolder(entry) {
+            const files = [];
+
+            async function processEntry(entry) {
+                return new Promise((resolve) => {
+                    if (entry.isFile) {
+                        entry.file(file => {
+                            files.push(file);
+                            resolve();
+                        });
+                    } else if (entry.isDirectory) {
+                        const reader = entry.createReader();
+                        reader.readEntries(async entries => {
+                            const promises = entries.map(e => processEntry(e));
+                            await Promise.all(promises);
+                            resolve();
+                        });
+                    }
+                });
+            }
+
+            await processEntry(entry);
+            return files;
+        }
+
+
+
+
+
+
+
+
+
+
+
+        function makeSliders(device) {
+            let pdiv = document.getElementById("rnbo-parameter-sliders");
+            let noParamLabel = document.getElementById("no-param-label");
+            if (noParamLabel && device.numParameters > 0) pdiv.removeChild(noParamLabel);
+
+            // This will allow us to ignore parameter update events while dragging the slider.
+            let isDraggingSlider = false;
+            let uiElements = {};
+
+            device.parameters.forEach(param => {
+                // Subpatchers also have params. If we want to expose top-level
+                // params only, the best way to determine if a parameter is top level
+                // or not is to exclude parameters with a '/' in them.
+                // You can uncomment the following line if you don't want to include subpatcher params
+
+                //if (param.id.includes("/")) return;
+
+                // Create a label, an input slider and a value display
+                let label = document.createElement("label");
+                let slider = document.createElement("input");
+                let text = document.createElement("input");
+                let sliderContainer = document.createElement("div");
+                sliderContainer.appendChild(label);
+                sliderContainer.appendChild(slider);
+                sliderContainer.appendChild(text);
+
+                // Add a name for the label
+                label.setAttribute("name", param.name);
+                label.setAttribute("for", param.name);
+                label.setAttribute("class", "param-label");
+                label.textContent = `${param.name}: `;
+
+                // Make each slider reflect its parameter
+                slider.setAttribute("type", "range");
+                slider.setAttribute("class", "param-slider");
+                slider.setAttribute("id", param.id);
+                slider.setAttribute("name", param.name);
+                slider.setAttribute("min", param.min);
+                slider.setAttribute("max", param.max);
+                if (param.steps > 1) {
+                    slider.setAttribute("step", (param.max - param.min) / (param.steps - 1));
+                } else {
+                    slider.setAttribute("step", (param.max - param.min) / 1000.0);
+                }
+                slider.setAttribute("value", param.value);
+
+                // Make a settable text input display for the value
+                text.setAttribute("value", param.value.toFixed(1));
+                text.setAttribute("type", "text");
+
+                // Make each slider control its parameter
+                slider.addEventListener("pointerdown", () => {
+                    isDraggingSlider = true;
+                });
+                slider.addEventListener("pointerup", () => {
+                    isDraggingSlider = false;
+                    slider.value = param.value;
+                    text.value = param.value.toFixed(1);
+                });
+                slider.addEventListener("input", () => {
+                    let value = Number.parseFloat(slider.value);
+                    param.value = value;
+                });
+
+                // Make the text box input control the parameter value as well
+                text.addEventListener("keydown", (ev) => {
+                    if (ev.key === "Enter") {
+                        let newValue = Number.parseFloat(text.value);
+                        if (isNaN(newValue)) {
+                            text.value = param.value;
+                        } else {
+                            newValue = Math.min(newValue, param.max);
+                            newValue = Math.max(newValue, param.min);
+                            text.value = newValue;
+                            param.value = newValue;
+                        }
+                    }
+                });
+
+                // Store the slider and text by name so we can access them later
+                uiElements[param.id] = { slider, text };
+
+                // Add the slider element
+                pdiv.appendChild(sliderContainer);
+            });
+
+            // Listen to parameter changes from the device
+            device.parameterChangeEvent.subscribe(param => {
+                if (!isDraggingSlider)
+                    uiElements[param.id].slider.value = param.value;
+                uiElements[param.id].text.value = param.value.toFixed(1);
+            });
+        }
+
+        function makeInportForm(device) {
+            const idiv = document.getElementById("rnbo-inports");
+            const inportSelect = document.getElementById("inport-select");
+            const inportText = document.getElementById("inport-text");
+            const inportForm = document.getElementById("inport-form");
+            let inportTag = null;
+
+            // Device messages correspond to inlets/outlets or inports/outports
+            // You can filter for one or the other using the "type" of the message
+            const messages = device.messages;
+            const inports = messages.filter(message => message.type === RNBO.MessagePortType.Inport);
+
+            if (inports.length === 0) {
+                idiv.removeChild(document.getElementById("inport-form"));
+                return;
+            } else {
+                idiv.removeChild(document.getElementById("no-inports-label"));
+                inports.forEach(inport => {
+                    const option = document.createElement("option");
+                    option.innerText = inport.tag;
+                    inportSelect.appendChild(option);
+                });
+                inportSelect.onchange = () => inportTag = inportSelect.value;
+                inportTag = inportSelect.value;
+
+                inportForm.onsubmit = (ev) => {
+                    // Do this or else the page will reload
+                    ev.preventDefault();
+
+                    // Turn the text into a list of numbers (RNBO messages must be numbers, not text)
+                    const values = inportText.value.split(/\s+/).map(s => parseFloat(s));
+
+                    // Send the message event to the RNBO device
+                    let messageEvent = new RNBO.MessageEvent(RNBO.TimeNow, inportTag, values);
+                    device.scheduleEvent(messageEvent);
+                }
+            }
+        }
+
+        function attachOutports(device) {
+            const outports = device.outports;
+            if (outports.length < 1) {
+                document.getElementById("rnbo-console").removeChild(document.getElementById("rnbo-console-div"));
+                return;
+            }
+
+            document.getElementById("rnbo-console").removeChild(document.getElementById("no-outports-label"));
+            device.messageEvent.subscribe((ev) => {
+
+                // Ignore message events that don't belong to an outport
+                if (outports.findIndex(elt => elt.tag === ev.tag) < 0) return;
+
+                // Message events have a tag as well as a payload
+                console.log(`${ev.tag}: ${ev.payload}`);
+
+                document.getElementById("rnbo-console-readout").innerText = `${ev.tag}: ${ev.payload}`;
+            });
+        }
+
+        function loadPresets(device, patcher) {
+            let presets = patcher.presets || [];
+            if (presets.length < 1) {
+                document.getElementById("rnbo-presets").removeChild(document.getElementById("preset-select"));
+                return;
+            }
+
+            document.getElementById("rnbo-presets").removeChild(document.getElementById("no-presets-label"));
+            let presetSelect = document.getElementById("preset-select");
+            presets.forEach((preset, index) => {
+                const option = document.createElement("option");
+                option.innerText = preset.name;
+                option.value = index;
+                presetSelect.appendChild(option);
+            });
+            presetSelect.onchange = () => device.setPreset(presets[presetSelect.value].preset);
+        }
+
+        function makeMIDIKeyboard(device) {
+            let mdiv = document.getElementById("rnbo-clickable-keyboard");
+            if (device.numMIDIInputPorts === 0) return;
+
+            mdiv.removeChild(document.getElementById("no-midi-label"));
+
+            const midiNotes = [49, 52, 56, 63];
+            midiNotes.forEach(note => {
+                const key = document.createElement("div");
+                const label = document.createElement("p");
+                label.textContent = note;
+                key.appendChild(label);
+                key.addEventListener("pointerdown", () => {
+                    let midiChannel = 0;
+
+                    // Format a MIDI message paylaod, this constructs a MIDI on event
+                    let noteOnMessage = [
+                        144 + midiChannel, // Code for a note on: 10010000 & midi channel (0-15)
+                        note, // MIDI Note
+                        100 // MIDI Velocity
+                    ];
+
+                    let noteOffMessage = [
+                        128 + midiChannel, // Code for a note off: 10000000 & midi channel (0-15)
+                        note, // MIDI Note
+                        0 // MIDI Velocity
+                    ];
+
+                    // Including rnbo.min.js (or the unminified rnbo.js) will add the RNBO object
+                    // to the global namespace. This includes the TimeNow constant as well as
+                    // the MIDIEvent constructor.
+                    let midiPort = 0;
+                    let noteDurationMs = 250;
+
+                    // When scheduling an event to occur in the future, use the current audio context time
+                    // multiplied by 1000 (converting seconds to milliseconds) for now.
+                    let noteOnEvent = new RNBO.MIDIEvent(device.context.currentTime * 1000, midiPort, noteOnMessage);
+                    let noteOffEvent = new RNBO.MIDIEvent(device.context.currentTime * 1000 + noteDurationMs, midiPort, noteOffMessage);
+
+                    device.scheduleEvent(noteOnEvent);
+                    device.scheduleEvent(noteOffEvent);
+
+                    key.classList.add("clicked");
+                });
+
+                key.addEventListener("pointerup", () => key.classList.remove("clicked"));
+
+                mdiv.appendChild(key);
+            });
+        }
+
+
+        // Initialize audio context on modal click
+        document.getElementById('initialModal').addEventListener('click', async () => {
+            try {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                mainOutput = audioContext.createGain();
+                mainOutput.connect(audioContext.destination);
+
+                document.getElementById('initialModal').style.display = 'none';
+
+                console.log('Audio Context initialized:', audioContext);
+                showStatus('Audio initialized - ready for patch');
+            } catch (error) {
+                console.error('Error initializing audio:', error);
+                showStatus('Error initializing audio', true);
+            }
+        });
+
+        // Volume control
+        document.getElementById('volumeSlider').addEventListener('input', (e) => {
+            if (mainOutput) {
+                mainOutput.gain.setValueAtTime(e.target.value, audioContext.currentTime);
+            }
+        });
+
+        const rnboPatcherUI = document.getElementById('rnbo-root');
+        defaultUI = rnboPatcherUI.innerHTML;
+
+        // Drag and drop handlers
+        const dropZone = document.getElementById('dropZone');
+
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('dragging');
+        });
+
+        dropZone.addEventListener('dragleave', () => {
+            dropZone.classList.remove('dragging');
+        });
+
+        dropZone.addEventListener('drop', handleDrop);
+
+
+
+    </script>
+</body>
+
+</html>
