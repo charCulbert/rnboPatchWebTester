@@ -246,9 +246,31 @@
 
         }
 
+        async function setupWebMIDI() {
+            try {
+                const access = await navigator.requestMIDIAccess();
+                access.inputs.forEach(input => {
+                    input.onmidimessage = handleMIDIMessage;
+                });
+                access.onstatechange = (e) => {
+                    // Only keep state change handling, no logging
+                };
+            } catch (err) {
+                console.warn('WebMIDI not available:', err);
+            }
+        }
+
+        function handleMIDIMessage(event) {
+            if (!device) return;
+            const midiEvent = new RNBO.MIDIEvent(device.context.currentTime * 1000, 0, event.data);
+            device.scheduleEvent(midiEvent);
+        }
+
         // Core setup function
         async function setup(files) {
             try {
+                await setupWebMIDI();
+                
                 console.log('Setting up RNBO with files:', files);
 
                 // Find our .export.json file
@@ -347,43 +369,146 @@
 
 
 
+        class WavDecoder {
+            constructor(buffer) {
+                this.buffer = buffer;
+                this.dataView = new DataView(buffer);
+                this.offset = 0;
+            }
+
+            readString(length) {
+                const bytes = new Uint8Array(this.buffer, this.offset, length);
+                this.offset += length;
+                return String.fromCharCode(...bytes);
+            }
+
+            readInt32() {
+                const value = this.dataView.getInt32(this.offset, true);
+                this.offset += 4;
+                return value;
+            }
+
+            readInt16() {
+                const value = this.dataView.getInt16(this.offset, true);
+                this.offset += 2;
+                return value;
+            }
+
+            decode() {
+                // Check RIFF header
+                if (this.readString(4) !== 'RIFF') {
+                    throw new Error('Not a valid WAV file');
+                }
+
+                // Skip file size
+                this.readInt32();
+
+                // Check WAVE format
+                if (this.readString(4) !== 'WAVE') {
+                    throw new Error('Not a valid WAV file');
+                }
+
+                // Find fmt chunk
+                while (this.readString(4) !== 'fmt ') {
+                    const chunkSize = this.readInt32();
+                    this.offset += chunkSize;
+                }
+
+                const fmtLength = this.readInt32();
+                const startPos = this.offset;
+
+                const formatType = this.readInt16();
+                const channels = this.readInt16();
+                const sampleRate = this.readInt32();
+                const bytesPerSecond = this.readInt32();
+                const blockAlign = this.readInt16();
+                const bitsPerSample = this.readInt16();
+
+                // Skip any extra format bytes
+                this.offset = startPos + fmtLength;
+
+                // Find data chunk
+                while (this.readString(4) !== 'data') {
+                    const chunkSize = this.readInt32();
+                    this.offset += chunkSize;
+                }
+
+                const dataLength = this.readInt32();
+                const samplesData = new Float32Array(dataLength / (bitsPerSample / 8));
+                
+                // Convert samples to float32
+                let sampleIndex = 0;
+                const scale = 1 / Math.pow(2, bitsPerSample - 1);
+
+                if (bitsPerSample === 16) {
+                    for (let i = 0; i < dataLength; i += 2) {
+                        samplesData[sampleIndex++] = this.dataView.getInt16(this.offset + i, true) * scale;
+                    }
+                } else if (bitsPerSample === 8) {
+                    for (let i = 0; i < dataLength; i++) {
+                        samplesData[sampleIndex++] = ((this.dataView.getInt8(this.offset + i) + 128) / 128) - 1;
+                    }
+                }
+
+                return {
+                    sampleRate,
+                    channels,
+                    bitsPerSample,
+                    samples: samplesData,
+                    duration: dataLength / bytesPerSecond
+                };
+            }
+        }
+
         async function loadDependencies(device, dependencies, files) {
             try {
                 console.log('Loading dependencies:', dependencies);
 
-                // Process each dependency
                 for (let dependency of dependencies) {
-                    // Extract just the filename from the path
                     const filename = dependency.file.split('/').pop();
-                    console.log('Looking for file:', filename);
-
-                    // Find matching file in our dropped files
                     const matchingFile = files.find(f => f.name.includes(filename));
 
                     if (matchingFile) {
-                        console.log('Found matching file:', matchingFile.name);
-                        const fileURL = URL.createObjectURL(matchingFile);
-                        // Update the dependency with the blob URL
-                        dependency.file = fileURL;
-                    } else {
-                        console.warn(`Could not find matching file for ${filename}`);
+                        // For wavetables, use our WAV decoder
+                        if (dependency.id.includes('wavetable')) {
+                            console.log(`Loading wavetable: ${filename}`);
+                            const arrayBuffer = await matchingFile.arrayBuffer();
+                            
+                            try {
+                                const decoder = new WavDecoder(arrayBuffer);
+                                const audioData = decoder.decode();
+                                
+                                console.log('WAV file info:', {
+                                    sampleRate: audioData.sampleRate,
+                                    channels: audioData.channels,
+                                    bitsPerSample: audioData.bitsPerSample,
+                                    duration: audioData.duration,
+                                    totalSamples: audioData.samples.length
+                                });
+
+                                // Use the first 1024 samples for the wavetable
+                                await device.setDataBuffer(dependency.id, audioData.samples, 1, audioData.sampleRate);
+                                console.log(`Wavetable ${dependency.id} loaded successfully`);
+                            } catch (error) {
+                                console.error('WAV decoding error:', error);
+                                throw error;
+                            }
+                        } else {
+                            // For regular samples, use decodeAudioData
+                            console.log(`Loading regular sample: ${filename}`);
+                            const arrayBuffer = await matchingFile.arrayBuffer();
+                            const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+                            await device.setDataBuffer(dependency.id, audioBuffer);
+                            console.log(`Sample ${dependency.id} loaded successfully`);
+                        }
                     }
                 }
 
-                // Load all dependencies into the device
-                await device.loadDataBufferDependencies(dependencies);
-                console.log('Dependencies loaded successfully');
+                console.log('RNBO buffer descriptions:', device.dataBufferDescriptions);
 
             } catch (err) {
                 console.error("Error loading dependencies:", err);
-                showStatus('Error loading audio dependencies', true);
-            } finally {
-                // Clean up any created URLs
-                dependencies.forEach(dep => {
-                    if (dep.file && dep.file.startsWith('blob:')) {
-                        URL.revokeObjectURL(dep.file);
-                    }
-                });
+                throw err;
             }
         }
 
